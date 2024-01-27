@@ -3,27 +3,220 @@
 ## How to use
 
 - Open a 3D Desmos graph
-- Paste `main-3d.js` into F12 JS console
-- Follow the prompt to download model
-- You can change the 3D model format format by changing `download(GLB|OBJ|STL)()` at the end of the script
+- Turn off slider and ticker animation
+- Zoom / Resize window for desired shape and line thickness
+- Copy the content of `main-3d.js` and paste into browser JS console
+- Once the model re-loads fully, without changing graph viewport, call a function like `downloadGLB()`, `downloadOBJ()`, or `downloadSTL()` to prompt download the 3D model
+- Refresh window before viewing/downloading a new graph
+
+## Limitations / To-do
+
+- Support exporting points, spheres, and ellipsoids (which are rendered separately in Desmos)
+- Clip mesh parts outside view box (Desmos clips using shader tricks)
+- Fix occassional lag/crash
+- Fix script when Desmos update breaks it
 
 */
 
 "use strict";
 
-function matrixTransform(mat, a) {
-    for (var k = 0; k < a.length; k += 3) {
-        var v = [a[k], a[k+1], a[k+2], 1];
-        var w = [0, 0, 0, 0];
-        for (var i = 0; i < 4; i++)
-            for (var j = 0; j < 4; j++)
-                w[i] += mat[j*4+i] * v[j];
-        for (var i = 0; i < 3; i++)
-            a[k+i] = w[i]/w[3];
+
+/******** WebGL Wrapper ********/
+
+// https://developer.mozilla.org/en-US/docs/Web/API/WebGL_API/Constants
+const GL_CONSTANTS = {
+    0x0000: "POINTS", 0x0001: "LINES", 0x0002: "LINE_LOOP", 0x0003: "LINE_STRIP", 0x0004: "TRIANGLES", 0x0005: "TRIANGLE_STRIP", 0x0006: "TRIANGLE_FAN",
+    0x88E4: "STATIC_DRAW", 0x88E0: "STREAM_DRAW", 0x88E8: "DYNAMIC_DRAW", 0x8892: "ARRAY_BUFFER", 0x8893: "ELEMENT_ARRAY_BUFFER", 0x8764: "BUFFER_SIZE", 0x8765: "BUFFER_USAGE",
+    0x1400: "BYTE", 0x1401: "UNSIGNED_BYTE", 0x1402: "SHORT", 0x1403: "UNSIGNED_SHORT", 0x1404: "INT", 0x1405: "UNSIGNED_INT", 0x1406: "FLOAT",
+    0x1902: "DEPTH_COMPONENT", 0x1906: "ALPHA", 0x1907: "RGB", 0x1908: "RGBA", 0x1909: "LUMINANCE", 0x190A: "LUMINANCE_ALPHA",
+    0x8B30: "FRAGMENT_SHADER", 0x8B31: "VERTEX_SHADER", 0x8B81: "COMPILE_STATUS", 0x8B82: "LINK_STATUS",
+    0x8D40: "FRAMEBUFFER", 0x8D41: "RENDERBUFFER", 0x0C02: "READ_BUFFER", 0x8CA6: "DRAW_FRAMEBUFFER_BINDING", 0x8CA8: "READ_FRAMEBUFFER", 0x8CA9: "DRAW_FRAMEBUFFER", 0x8CAA: "READ_FRAMEBUFFER_BINDING",
+};
+
+// https://www.khronos.org/files/webgl20-reference-guide.pdf
+
+if (typeof WebGL2WrapperOriginal === 'undefined')
+    window.WebGL2WrapperOriginal = {};
+
+function WebGL2Wrapper(name, handler) {
+    if (!WebGL2WrapperOriginal.hasOwnProperty(name))
+        WebGL2WrapperOriginal[name] = WebGL2RenderingContext.prototype[name];
+    WebGL2RenderingContext.prototype[name] = function () {
+        var returnValue = WebGL2WrapperOriginal[name].apply(this, arguments);
+        try {
+            handler(returnValue, ...arguments);
+        }
+        catch(e) {
+            console.error(e);
+        }
+        return returnValue;
     }
 }
 
-function validMesh(model) {
+var ShaderSources = {};
+let AttributeLocations = {
+    0: { name: "position", buffer_id: -1 },
+    1: { name: "normal", buffer_id: -1 },
+    2: { name: "uv", buffer_id: -1 }
+};
+let UniformLocations = [];
+let Buffers = [];
+var activeBuffer = -1;
+let Framebuffers = [];
+var activeFramebuffer = -1;
+var activeColor = [1, 1, 1, 1];
+var activeRoughness = 1.0;
+
+WebGL2Wrapper('shaderSource', (_, shader, source) => {
+    if (ShaderSources.hasOwnProperty(source))
+        ShaderSources[source] += 1;
+    else ShaderSources[source] = 1;
+    console.log(source);
+});
+
+WebGL2Wrapper('clearColor', (_, c0, c1, c2, c3) => {
+    console.log('clearColor', c0, c1, c2, c3);
+});
+WebGL2Wrapper('clearDepth', (_, c0, c1, c2, c3) => {
+    console.log('clearDepth', c0, c1, c2, c3);
+});
+WebGL2Wrapper('clear', (_, x) => {
+    console.log('clear', '0x'+x.toString(16));
+});
+
+WebGL2Wrapper('useProgram', (_, program) => {
+    console.log('useProgram', program);
+});
+WebGL2Wrapper('getAttribLocation', (location, program, name) => {
+    console.log('getAttribLocation', program, name, '->', location);
+    if (location)
+        AttributeLocations[location] = { name: name, buffer_id: -1 };
+});
+WebGL2Wrapper('getUniform', (result, program, location) => {
+    console.log('getUniform', program, location, '->', result);
+});
+WebGL2Wrapper('getUniformLocation', (location, program, name) => {
+    console.log('getUniformLocation', program, name, '->', location);
+    if (location) {
+        location.id = UniformLocations.length;
+        location.name = name;
+        UniformLocations.push(location);
+    }
+});
+WebGL2Wrapper('uniform4fv', (_, location, value) => {
+    console.log('uniform4fv', location, value);
+    // if (location.name == "pickingColor")
+    //     activeColor = value;
+});
+WebGL2Wrapper('uniform4f', (_, location, v0, v1, v2, v3) => {
+    console.log('uniform4f', location, v0, v1, v2, v3);
+});
+WebGL2Wrapper('uniform3fv', (_, location, value) => {
+    console.log('uniform3fv', location, value);
+});
+WebGL2Wrapper('uniform3f', (_, location, v0, v1, v2) => {
+    console.log('uniform3f', location, v0, v1, v2);
+    if (location && location.name == "diffuse")
+        activeColor = [v0, v1, v2, 1.0];
+});
+WebGL2Wrapper('uniform1f', (_, location, v0) => {
+    console.log('uniform1f', location, v0);
+    if (location && location.name == "roughness")
+        activeRoughness = v0;
+});
+
+WebGL2Wrapper('createBuffer', (buffer) => {
+    buffer.id = Buffers.length;
+    Buffers.push({ buffer: buffer, data: null, size: -1 });
+    console.log('createBuffer', '->', buffer);
+});
+WebGL2Wrapper('bindBuffer', (_, target, buffer) => {
+    console.log('bindBuffer', GL_CONSTANTS[target], buffer);
+    activeBuffer = buffer.id;
+});
+WebGL2Wrapper('bufferData', (_, target, data) => {
+    console.log('bufferData', GL_CONSTANTS[target], data);
+    Buffers[activeBuffer].data = data;
+});
+WebGL2Wrapper('vertexAttribPointer', (_, index, size, type, normalized, stride, offset) => {
+    console.log('vertexAttribPointer',
+        AttributeLocations[index],
+        size, GL_CONSTANTS[type], normalized, stride, offset);
+    if (Buffers[activeBuffer])
+        Buffers[activeBuffer].size = size;
+    if (AttributeLocations[index])
+        AttributeLocations[index].buffer_id = activeBuffer;
+});
+
+WebGL2Wrapper('createFramebuffer', (framebuffer) => {
+    framebuffer.id = Framebuffers.length;
+    Framebuffers.push(framebuffer);
+    console.log('createFramebuffer', '->', framebuffer);
+});
+WebGL2Wrapper('bindFramebuffer', (_, target, framebuffer) => {
+    console.log('bindFramebuffer', GL_CONSTANTS[target], framebuffer);
+    activeFramebuffer = framebuffer ? framebuffer.id : null;
+});
+WebGL2Wrapper('drawArrays', (_, mode, first, count) => {
+    console.log('drawArrays', GL_CONSTANTS[mode], first, count);
+});
+WebGL2Wrapper('drawArraysInstanced', (_, mode, first, count) => {
+    console.log('drawArraysInstanced', GL_CONSTANTS[mode], first, count);
+});
+WebGL2Wrapper('drawElements', (_, mode, count, type, offset) => {
+    console.log('drawElements', GL_CONSTANTS[mode], count, GL_CONSTANTS[type], offset);
+    if (GL_CONSTANTS[mode] == "TRIANGLES") {
+        addModel();
+    }
+});
+WebGL2Wrapper('drawElementsInstanced', (_, mode, count, type, offset) => {
+    console.log('drawElementsInstanced', GL_CONSTANTS[mode], count, GL_CONSTANTS[type], offset);
+});
+
+
+/******** Model Exporter ********/
+
+let Models = [];
+let ModelHashes = {
+    '8dc5ad4b70fbe090': -1,  // axis arrow
+    'd9ec0e5061527878': -1,  // axis rod
+    '463c904c2f580180': -1,  // point, sphere, ellipsoid
+};
+
+function hashArray(array) {
+    // used to check duplicate objects
+    // double max 2^53, 32 bit hash, ideally 77k values required for 50% hash collision
+    // use both position and indices to produce 64 bit hash, collision less likely 
+    var mod = Math.pow(2, 32);
+    var hash = array.length;
+    for (var i = 0; i < array.length; i++) {
+        var x = Math.round(array[i] * 65536) % mod;
+        if (x < 0) x += mod;
+        hash = (hash * 31 + x) % mod;
+    }
+    return hash.toString(16).padStart(8, '0');
+}
+
+function addModel() {
+
+    // retrieve model
+    var model = {
+        color: activeColor,
+        roughness: activeRoughness,
+        position: null,
+        normal: null,
+        indices: null
+    };
+    for (var key in AttributeLocations) {
+        var attrib = AttributeLocations[key];
+        if (model.hasOwnProperty(attrib.name) &&
+                Buffers[attrib.buffer_id]) {
+            model[attrib.name] = Buffers[attrib.buffer_id].data;
+        }
+    }
+    if (Buffers[activeBuffer])
+        model.indices = Buffers[activeBuffer].data;
+
     // sanity check
     if (!model.position)
         return console.log("Model has no position");
@@ -39,6 +232,9 @@ function validMesh(model) {
         return console.log("Position buffer length not multiple of 3 ("+n+")");
     if (m % 3 != 0)
         return console.log("Indice length not multiple of 3 ("+m+")");
+    var hash = hashArray(model.position) + hashArray(model.indices);
+    if (ModelHashes.hasOwnProperty(hash))
+        return console.log("Model already added");
     var used = new Uint8Array(n/3).fill(0);
     for (var i = 0; i < m; i++) {
         if (model.indices[i] != Math.round(model.indices[i]))
@@ -50,9 +246,11 @@ function validMesh(model) {
     var usedCount = 0;
     for (var i = 0; i < n/3; i++)
         usedCount += used[i];
-    console.log("Valid mesh - "+(usedCount/(n/3)*100).toFixed(6)+"% points used.");
+    console.log("Valid model - "+(usedCount/(n/3)*100).toFixed(6)+"% indices used.");
 
-    return true;
+    // add model
+    ModelHashes[hash] = Models.length;
+    Models.push(model);
 }
 
 function concatComponents(components) {
@@ -218,7 +416,7 @@ function encodeGLB(objects) {
             name: "Desmos_Material_"+objOffset,
             pbrMetallicRoughness: {
                 baseColorFactor: model.color,
-                metallicFactor: model.metalness,
+                metallicFactor: 0.0,
                 roughnessFactor: model.roughness
             },
             doubleSided: true
@@ -312,66 +510,32 @@ function downloadFile(content, type, filename) {
     document.body.removeChild(link);
 }
 
-function downloadSTL(models) {
-    downloadFile(encodeSTL(models), 'model/stl', 'model.stl');
+function downloadSTL() {
+    downloadFile(encodeSTL(Models), 'model/stl', 'model.stl');
 }
-function downloadOBJ(models) {
-    downloadFile(encodeOBJ(models), 'model/obj', 'model.obj');
+function downloadOBJ() {
+    downloadFile(encodeOBJ(Models), 'model/obj', 'model.obj');
 }
-function downloadGLB(models) {
-    downloadFile(encodeGLB(models), 'model/gltf-binary', 'model.glb');
+function downloadGLB() {
+    downloadFile(encodeGLB(Models), 'model/gltf-binary', 'model.glb');
 }
 
 (function() {
-    let models = [];
-    
-    let surfaces = Calc.controller.grapher3d.webglLayer.surfaces;
-    for (var key in surfaces) {
-        
-        // retrive data
-        let mesh = surfaces[key].mesh;
-        let diffuse = mesh.material.uniforms.diffuse.value;
-        let color = [diffuse.r, diffuse.g, diffuse.b, 1.0];
-        let metalness = mesh.material.uniforms.metalness.value;
-        let roughness = mesh.material.uniforms.roughness.value;
-        let position = mesh.geometry.attributes.position.array.slice();
-        let normal = mesh.geometry.attributes.normal.array.slice();
-        let indices = mesh.geometry.index.array.slice();
+    // get state
+    let state = Calc.getState();
 
-        // transform
-        let mat = mesh.dcgModelMatrix.elements.slice();
-        matrixTransform(mat, position);
-        // assume translation / uniform scaling, normal doesn't change
-        // to-do: ellipsoid?
-
-        // add model
-        let model = {
-            color: color,
-            metalness: metalness,
-            roughness: roughness,
-            position: position,
-            normal: normal,
-            indices: indices
-        };
-        if (validMesh(model) !== true)
-            continue;
-        if (mesh.count) {
-            for (var k = 0; k < mesh.count; k++) {
-                let model1 = { ...model };
-                let color = mesh.instanceColor.array.slice(3*k, 3*k+3);
-                model1.color = [color[0], color[1], color[2], 1.0];
-                let mat = mesh.instanceMatrix.array.slice(16*k, 16*k+16);
-                model1.position = model.position.slice();
-                matrixTransform(mat, model1.position);
-                model1.normal = model.normal.slice();
-                model1.indices = model.indices.slice();
-                models.push(model1);
-            }
-        }
-        else models.push(model);
+    // turn off animation
+    let exprs = state.expressions.list;
+    for (var i = 0; i < exprs.length; i++) {
+        let expr = exprs[i];
+        if (expr.slider && expr.slider.isPlaying)
+            expr.slider.isPlaying = false;
     }
+    let ticker = state.expressions.ticker;
+    if (ticker && ticker.playing)
+        ticker.playing = false;
+    state.graph.speed3D = 0;
 
-    //downloadSTL(models);
-    //downloadOBJ(models);
-    downloadGLB(models);
+    // set state
+    Calc.setState(state);
 })()

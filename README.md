@@ -7,19 +7,15 @@ Export graphs created in [Desmos 3D Graphing Calculator](https://www.desmos.com/
 ## How to use
 
 - Open a 3D Desmos graph
-- Turn off slider and ticker animation
-- Zoom / Resize window for desired shape and line thickness
-- Copy the content of `main-3d.js` and paste into browser JS console
-- Once the model re-loads fully, without changing graph viewport, call a function like `downloadGLB()`, `downloadOBJ()`, or `downloadSTL()` to prompt download the 3D model
-- Refresh window before viewing/downloading a new graph
+- Paste `main-3d.js` into F12 JS console
+- Follow the prompt to download model
+- You can change the 3D model format format by changing `download(GLB|OBJ|STL)()` at the end of the script
 
-## Limitations / To-do
+## To-do
 
-- Support exporting points, spheres, and ellipsoids (which are rendered separately in Desmos)
-- Clip mesh parts outside view box (Desmos clips using shader tricks)
-- Fix occassional lag/crash
+- Test on more graphs
 - Fix script when Desmos update breaks it
 
 ## How it works
 
-The script creates a wrapper for WebGL that logs 3D model information like geometry and color.
+Thanks user `ronwnor` on Desmos Discord server for pointing out the object `Calc.controller.grapher3d.webglLayer.surfaces` in Desmos 3D graphing calculator. Prior to this, the script `main-3d-webgl.js` creates a wrapper for WebGL that logs 3D model information like geometry and color.
