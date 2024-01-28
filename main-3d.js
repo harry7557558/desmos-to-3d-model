@@ -3,6 +3,7 @@
 ## How to use
 
 - Open a 3D Desmos graph
+- Zoom / Resize window for desired shape and point/line size/thickness
 - Paste `main-3d.js` into F12 JS console
 - Follow the prompt to download model
 - You can change the 3D model format format by changing `download(GLB|OBJ|STL)()` at the end of the script
@@ -50,9 +51,143 @@ function validMesh(model) {
     var usedCount = 0;
     for (var i = 0; i < n/3; i++)
         usedCount += used[i];
-    console.log("Valid mesh - "+(usedCount/(n/3)*100).toFixed(6)+"% points used.");
+    //console.log("Valid mesh - "+(usedCount/(n/3)*100).toFixed(6)+"% points used.");
 
     return true;
+}
+
+function clipMesh(mesh, clip) {
+    // get geometry
+    var position = new Array(mesh.position.length / 3);
+    var normal = new Array(mesh.normal.length / 3);
+    for (var i = 0; i < mesh.position.length; i += 3) {
+        position[i/3] = [
+            mesh.position[i],
+            mesh.position[i+1],
+            mesh.position[i+2]
+        ];
+        normal[i/3] = [
+            mesh.normal[i],
+            mesh.normal[i+1],
+            mesh.normal[i+2]
+        ];
+    }
+    // calculate offsets
+    var offsets = new Array(position.length);
+    var calc_o = function(p, n, o) {
+        return p[0]*n[0]+p[1]*n[1]+p[2]*n[2]-o;
+    }
+    var clip_size = Math.cbrt(
+        (clip.xmax-clip.xmin)*(clip.ymax-clip.ymin)*(clip.zmax-clip.zmin));
+    for (var i = 0; i < position.length; i++) {
+        var p = position[i];
+        var o = calc_o(p, [1, 0, 0], clip.xmax);
+        o = Math.max(o, calc_o(p, [0, 1, 0], clip.ymax));
+        o = Math.max(o, calc_o(p, [0, 0, 1], clip.zmax));
+        o = Math.max(o, calc_o(p, [-1, 0, 0], -clip.xmin));
+        o = Math.max(o, calc_o(p, [0, -1, 0], -clip.ymin));
+        o = Math.max(o, calc_o(p, [0, 0, -1], -clip.zmin));
+        offsets[i] = o + 1e-4*clip_size;
+    }
+    // clip each triangle
+    var indices = [];
+    var edgemap = {};
+    var FACE_TABLE = [
+        [0, 1, 2],  // 000
+        [3, 1, 2, 5, 3, 2],  // 001
+        [0, 3, 2, 2, 3, 4],  // 010
+        [2, 5, 4],  // 011
+        [0, 4, 5, 0, 1, 4], // 100
+        [3, 1, 4],  // 101
+        [0, 3, 5],  // 110
+        [],  // 111
+    ]
+    for (var ii = 0; ii < mesh.indices.length; ii += 3) {
+        var vi = [
+            mesh.indices[ii],
+            mesh.indices[ii+1],
+            mesh.indices[ii+2],
+            -1, -1, -1
+        ];
+        // create new vertices on edges
+        for (var i = 0; i < 3; i++) {
+            var a = vi[i];
+            var b = vi[(i+1)%3];
+            if (offsets[a]*offsets[b] < 0) {
+                var key = Math.min(a,b) + ',' + Math.max(a,b);
+                if (edgemap.hasOwnProperty(key)) {
+                    vi[i+3] = edgemap[key];
+                }
+                vi[i+3] = edgemap[key] = position.length;
+                var t = -offsets[a] / (offsets[b]-offsets[a]);
+                var p = [0, 0, 0];
+                var n = [0, 0, 0], nl = 0.0;
+                for (var j = 0; j < 3; j++) {
+                    p[j] = position[a][j]*(1.0-t)+position[b][j]*t;
+                    n[j] = normal[a][j]*(1.0-t)+normal[b][j]*t;
+                    nl += n[j]*n[j];
+                }
+                var ns = 1.0 / Math.sqrt(nl);
+                position.push(p);
+                normal.push([n[0]*ns, n[1]*ns, n[2]*ns]);
+            }
+        }
+        // create new triangles
+        var tcase = 0;
+        for (var i = 0; i < 3; i++) {
+            var a = vi[i];
+            if (offsets[a] > 0.0) {
+                vi[i] = -1;
+                tcase |= (1<<i);
+            }
+        }
+        tcase = FACE_TABLE[tcase];
+        for (var i = 0; i < tcase.length; i++) {
+            if (tcase[i] == -1)
+                throw new Error(-1);
+            indices.push(vi[tcase[i]]);
+        }
+    }
+    // remove unused vertices
+    var vertMap = new Array(position.length).fill(-1);
+    for (var i = 0; i < indices.length; i++)
+        vertMap[indices[i]] = 1;
+    for (var i = 0; i < position.length; i++) {
+        var p = position[i];
+        if (!(isFinite(p[0]) && isFinite(p[1]) && isFinite(p[2])))
+            vertMap[i] = -1;
+    }
+    var numVerts = 0;
+    for (var i = 0; i < position.length; i++) {
+        if (vertMap[i] != -1) {
+            vertMap[i] = numVerts;
+            numVerts += 1;
+        }
+    }
+    var numIndices = 0;
+    for (var i = 0; i < indices.length; i += 3) {
+        if (vertMap[indices[i]] == -1 ||
+            vertMap[indices[i+1]] == -1 ||
+            vertMap[indices[i+2]] == -1)
+            continue;
+        for (var _ = 0; _ < 3; _++)
+            indices[numIndices+_] = vertMap[indices[i+_]];
+        numIndices += 3;
+    }
+    indices = indices.slice(0, numIndices);
+    // update model
+    mesh.position = new Float32Array(3*numVerts);
+    mesh.normal = new Float32Array(3*numVerts);
+    var vertCount = 0;
+    for (var i = 0; i < 3*position.length; i++) {
+        var ii = Math.floor(i/3);
+        if (vertMap[ii] == -1)
+            continue;
+        mesh.position[vertCount] = position[ii][i%3];
+        mesh.normal[vertCount] = normal[ii][i%3];
+        vertCount += 1;
+    }
+    mesh.indices = Uint32Array.from(indices);
 }
 
 function concatComponents(components) {
@@ -193,9 +328,14 @@ function encodeGLB(objects) {
         var pmin = [Infinity, Infinity, Infinity];
         var pmax = [-Infinity, -Infinity, -Infinity];
         for (var i = 0; i < position.length; i++) {
-            pmin[i%3] = Math.min(pmin[i%3], position[i]);
-            pmax[i%3] = Math.max(pmax[i%3], position[i]);
+            if (isFinite(position[i])) {
+                pmin[i%3] = Math.min(pmin[i%3], position[i]);
+                pmax[i%3] = Math.max(pmax[i%3], position[i]);
+            }
         }
+        if (!isFinite(pmax[0]-pmin[0]) || !isFinite(pmax[1]-pmin[1]) ||
+               !isFinite(pmax[2]-pmin[2]))
+            return;
         // add components
         gltf.scenes[0].nodes.push(objOffset);
         gltf.nodes.push({
@@ -324,7 +464,9 @@ function downloadGLB(models) {
 
 (function() {
     let models = [];
-    
+
+    let clip = Calc.getState().graph.viewport;
+
     let surfaces = Calc.controller.grapher3d.webglLayer.surfaces;
     for (var key in surfaces) {
         
@@ -365,13 +507,19 @@ function downloadGLB(models) {
                 matrixTransform(mat, model1.position);
                 model1.normal = model.normal.slice();
                 model1.indices = model.indices.slice();
-                models.push(model1);
+                clipMesh(model1, clip);
+                if (model1.indices.length > 0)
+                    models.push(model1);
             }
         }
-        else models.push(model);
+        else {
+            clipMesh(model, clip);
+            if (model.indices.length > 0)
+                models.push(model);
+        }
     }
 
     //downloadSTL(models);
     //downloadOBJ(models);
     downloadGLB(models);
-})()
+})();
