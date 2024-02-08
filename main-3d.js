@@ -293,10 +293,74 @@ function encodeOBJ(objects) {
     return objContent;
 }
 
-function encodeGLB(objects) {
+function encodeGLB(objects_) {
+
+    var objects = [];
+    for (var mi = 0; mi < objects_.length;) {
+        // get consecutive models
+        var model = objects_[mi];
+        var vn = model.position.length;
+        var fn = model.indices.length;
+        var models = [model];
+        var sameColor = true;
+        for (mi++; mi < objects_.length; mi++) {
+            var model1 = objects_[mi];
+            var equal = (!model1.colors && !model.colors &&
+                         model1.key.split(':')[0] == model.key.split(':')[0] &&
+                         model1.position.length == vn &&
+                         model1.normal.length == vn &&
+                         model1.indices.length == fn);
+            if (equal) {
+                for (var i = 0; i < model1.indices.length; i++)
+                    if (model1.indices[i] != model.indices[i])
+                    { equal = false; break; }
+            }
+            if (!equal) break;
+            models.push(model1);
+            if (JSON.stringify(model1.color) != JSON.stringify(model.color)
+                || model1.metalness != model.metalness
+                || model1.roughness != model.roughness)
+                sameColor = false;
+        }
+        // merge
+        var n = models.length;
+        if (n == 1) {
+            objects.push(model);
+            continue;
+        }
+        var object = {
+            key: model.key,
+            position: new Float32Array(vn*n),
+            normal: new Float32Array(vn*n),
+            indices: new Float32Array(fn*n),
+            color: [1, 1, 1, 1],
+            metalness: model.metalness,
+            roughness: model.roughness
+        };
+        if (sameColor)
+            object.color = model.color;
+        else
+            object.colors = new Float32Array(vn*n);
+        for (var i = 0; i < n; i++) {
+            object.position.set(models[i].position, vn*i);
+            object.normal.set(models[i].normal, vn*i);
+            object.indices.set(models[i].indices, fn*i);
+            for (var j = 0; j < fn; j++)
+                object.indices[fn*i+j] += vn*i/3;
+            if (sameColor) continue;
+            for (var j = 0; j < vn; j++)
+                object.colors[vn*i+j] = models[i].color[j%3];
+        }
+        objects.push(object);
+    }
+    console.log("glTF contains", objects.length, "objects");
+    
     // https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html
     let gltf = {
-        asset: { version: "2.0" },
+        asset: {
+            version: "2.0",
+            copyright: window.location.href
+        },
         scene: 0,
         scenes: [{ name: "Desmos_3D", nodes: [] }],
         nodes: [],
@@ -340,10 +404,10 @@ function encodeGLB(objects) {
         gltf.scenes[0].nodes.push(objOffset);
         gltf.nodes.push({
             mesh: objOffset,
-            name: "Desmos_Mesh_"+objOffset
+            name: "Desmos_Mesh_"+model.key
         });
-        gltf.meshes.push({
-            name: "Desmos_Mesh_"+objOffset,
+        let mesh = {
+            name: "Desmos_Mesh_"+model.key,
             primitives: [{
                 attributes: {
                     POSITION: accessorOffset+0,
@@ -353,17 +417,17 @@ function encodeGLB(objects) {
                 material: objOffset,
                 mode: 4
             }]
-        });
-        gltf.materials.push({
-            name: "Desmos_Material_"+objOffset,
+        };
+        let material = {
+            name: "Desmos_Material_"+model.key,
             pbrMetallicRoughness: {
                 baseColorFactor: model.color,
                 metallicFactor: model.metalness,
                 roughnessFactor: model.roughness
             },
             doubleSided: true
-        });
-        gltf.accessors = gltf.accessors.concat([
+        };
+        let accessors = [
             {
                 bufferView: accessorOffset+0,
                 componentType: 5126,
@@ -388,8 +452,8 @@ function encodeGLB(objects) {
                 max: [vn],
                 type: "SCALAR"
             }
-        ]);
-        gltf.bufferViews = gltf.bufferViews.concat([
+        ];
+        let bufferViews = [
             {
                 buffer: 0,
                 byteLength: vbn,
@@ -408,14 +472,42 @@ function encodeGLB(objects) {
                 byteOffset: bufferOffset+2*vbn,
                 target: 34963
             }
-        ]);
+        ];
         bufferComponents = bufferComponents.concat([
             position, normal,
             Uint32Array.from(model.indices)
         ]);
+        accessorOffset += accessors.length;
+        for (var i = 0; i < bufferViews.length; i++)
+            bufferOffset += bufferViews[i].byteLength;
+        if (model.colors) {
+            mesh.primitives[0].attributes['COLOR_0'] = accessorOffset;
+            material.pbrMetallicRoughness['baseColorTexture'] = {
+                index: gltf.bufferViews.length+bufferViews.length
+            };
+            accessors.push({
+                bufferView: accessorOffset,
+                componentType: 5126,
+                count: vn,
+                min: [0, 0, 0],
+                max: [1, 1, 1],
+                type: "VEC3"
+            });
+            bufferViews.push({
+                "buffer": 0,
+                "byteLength": vbn,
+                "byteOffset": bufferOffset,
+                "target": 34963
+            });
+            accessorOffset += 1;
+            bufferOffset += vbn;
+            bufferComponents.push(model.colors);
+        }
+        gltf.meshes.push(mesh);
+        gltf.materials.push(material);
+        gltf.accessors = gltf.accessors.concat(accessors);
+        gltf.bufferViews = gltf.bufferViews.concat(bufferViews);
         objOffset += 1;
-        accessorOffset += 3;
-        bufferOffset += 2*vbn+tbn;
     });
     gltf.buffers.push({
          byteLength: bufferOffset
@@ -488,6 +580,7 @@ function downloadGLB(models) {
 
         // add model
         let model = {
+            key: key,
             color: color,
             metalness: metalness,
             roughness: roughness,
@@ -495,6 +588,8 @@ function downloadGLB(models) {
             normal: normal,
             indices: indices
         };
+        if (mesh.geometry.attributes.color)
+            model.colors = mesh.geometry.attributes.color.array.slice();
         if (validMesh(model) !== true)
             continue;
         if (mesh.count) {

@@ -15,7 +15,6 @@ Export graphs created in [Desmos 3D Graphing Calculator](https://www.desmos.com/
 ## To-do
 
 - Support domain restriction `[expression] {x > #}`
-- Vertex color for small objects
 - Test on more graphs
 - Fix script when Desmos update breaks it
 
