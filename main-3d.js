@@ -87,7 +87,7 @@ function clipMesh(mesh, clip) {
         o = Math.max(o, calc_o(p, [-1, 0, 0], -clip.xmin));
         o = Math.max(o, calc_o(p, [0, -1, 0], -clip.ymin));
         o = Math.max(o, calc_o(p, [0, 0, -1], -clip.zmin));
-        offsets[i] = o + 1e-4*clip_size;
+        offsets[i] = o + 1e-6*clip_size;
     }
     // clip each triangle
     var indices = [];
@@ -557,7 +557,9 @@ function downloadGLB(models) {
 (function() {
     let models = [];
 
-    let clip = Calc.getState().graph.viewport;
+    let graph = Calc.getState().graph;
+    let useClip = graph.showBox3D === undefined || graph.showBox3D;
+    let clip = graph.viewport;
 
     let surfaces = Calc.controller.grapher3d.webglLayer.surfaces;
     for (var key in surfaces) {
@@ -602,13 +604,13 @@ function downloadGLB(models) {
                 matrixTransform(mat, model1.position);
                 model1.normal = model.normal.slice();
                 model1.indices = model.indices.slice();
-                clipMesh(model1, clip);
+                if (useClip) clipMesh(model1, clip);
                 if (model1.indices.length > 0)
                     models.push(model1);
             }
         }
         else {
-            clipMesh(model, clip);
+            if (useClip) clipMesh(model, clip);
             if (model.indices.length > 0)
                 models.push(model);
         }
